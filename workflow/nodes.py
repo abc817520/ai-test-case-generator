@@ -1,17 +1,19 @@
 ﻿import asyncio
+from datetime import datetime
 from pathlib import Path
 import sys
 from typing import Any, cast
+
+# Ensure project root is importable before importing project packages.
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.append(str(PROJECT_ROOT))
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.runnables import RunnableConfig
 
 from state import TestCaseState
-
-# 兼容当前脚本入口方式，确保可以导入项目根目录下的 skills 模块。
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.append(str(PROJECT_ROOT))
+from utils.excel_exporter.excel_exporter import export_test_cases_to_excel
 
 from skills.test_design_skills import (  # noqa: E402
     analyze_requirement_skill,
@@ -22,7 +24,7 @@ from skills.test_design_skills import (  # noqa: E402
 
 
 def _get_llm_from_config(config: RunnableConfig | None) -> BaseChatModel:
-    """从 LangGraph 运行配置中获取 LLM 实例。"""
+    """Get LLM instance from LangGraph runtime config."""
     if config is None:
         raise ValueError("缺少 config，无法获取 LLM 实例。")
 
@@ -117,3 +119,23 @@ def generate_cases_node(
             test_case.model_dump() for test_case in test_cases
         ]
     }
+
+
+def export_excel_node(
+    state: TestCaseState,
+    config: RunnableConfig | None = None,
+) -> dict[str, Any]:
+    """导出测试用例为 Excel 文件并返回输出路径。"""
+    print("--- 执行 Excel 导出 Node ---")
+    _ = config
+
+    cases_for_export = state["modified_test_cases"] or state["test_cases"]
+    output_dir = PROJECT_ROOT / "output"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_file = output_dir / f"test_cases_{timestamp}.xlsx"
+
+    excel_output_path = export_test_cases_to_excel(
+        test_cases=cases_for_export,
+        output_file_path=output_file,
+    )
+    return {"excel_output_path": excel_output_path}

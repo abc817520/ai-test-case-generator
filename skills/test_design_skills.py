@@ -1,5 +1,6 @@
 ﻿import json
 import re
+from pathlib import Path
 from typing import Any, TypeVar, cast
 
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -49,6 +50,12 @@ class TestCaseListOutput(BaseModel):
 
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
+PROMPT_DIR = Path(__file__).resolve().parent
+
+
+def _load_prompt_template(file_name: str) -> str:
+    prompt_path = PROMPT_DIR / file_name
+    return prompt_path.read_text(encoding="utf-8").strip()
 
 
 def _extract_text_content(content: Any) -> str:
@@ -185,26 +192,7 @@ async def analyze_requirement_skill(
 ) -> str:
     """分析结构化文档，生成需求分析报告。"""
     prompt = ChatPromptTemplate.from_template(
-        """
-<context>
-你是一名资深测试分析专家，擅长梳理需求中的显性与隐性约束。
-下面是结构化需求文档：
-{structured_doc}
-</context>
-
-<instruction>
-请输出需求分析报告，至少覆盖：
-1. 核心业务逻辑与关键流程。
-2. 前置依赖（上下游系统、配置、数据准备、权限等）。
-3. 隐含的非功能性需求（例如：数据一致性、异常容错、可用性）。
-</instruction>
-
-<constraints>
-1. 语言使用中文。
-2. 内容要可直接用于后续测试点设计。
-3. 不要输出与需求无关的泛化建议。
-</constraints>
-""".strip()
+        _load_prompt_template("analyze_requirement_skill.md")
     )
 
     result = await _invoke_structured_output(
@@ -234,27 +222,7 @@ async def extract_test_points_skill(
 ) -> list[TestPoint]:
     """基于需求分析提取测试点列表。"""
     prompt = ChatPromptTemplate.from_template(
-        """
-<context>
-你是一名资深测试设计专家，擅长等价类划分、边界值分析和错误推测法。
-下面是需求分析报告：
-{requirement_analysis}
-</context>
-
-<instruction>
-请基于需求分析提取测试点，必须覆盖以下维度：
-1. 正常场景。
-2. 边界值场景（例如：空值、极大值、非法字符）。
-3. 异常场景（例如：网络中断、权限不足）。
-</instruction>
-
-<constraints>
-1. 必须输出结构化测试点列表。
-2. 每个测试点都必须填写：name、test_type（功能/性能/安全）、priority（P0-P3）。
-3. 优先级要与业务风险匹配，避免全部给高优先级。
-4. 不要输出多余解释文本。
-</constraints>
-""".strip()
+        _load_prompt_template("extract_test_points_skill.md")
     )
 
     result = await _invoke_structured_output(
@@ -274,28 +242,7 @@ async def generate_outline_skill(
 ) -> list[TestOutline]:
     """基于测试点生成分模块测试大纲。"""
     prompt = ChatPromptTemplate.from_template(
-        """
-<context>
-你是一名资深测试架构师。
-下面是需求分析：
-{requirement_analysis}
-
-下面是已提取的测试点列表：
-{test_points}
-</context>
-
-<instruction>
-请基于测试点生成测试大纲，并按模块聚合。
-每个模块下必须放入对应测试点，不能丢失原始高优先级测试点。
-</instruction>
-
-<constraints>
-1. 输出必须是 TestOutline 列表（字段：module_name, test_points）。
-2. test_points 中每项必须是完整 TestPoint（name、test_type、priority）。
-3. 模块划分要清晰，避免“其他”这类无意义模块名。
-4. 不要输出解释文字。
-</constraints>
-""".strip()
+        _load_prompt_template("generate_outline_skill.md")
     )
 
     result = await _invoke_structured_output(
@@ -322,30 +269,7 @@ async def generate_cases_skill(
 ) -> list[TestCase]:
     """基于测试大纲生成结构化测试用例。"""
     prompt = ChatPromptTemplate.from_template(
-        """
-<context>
-你是一名资深测试设计专家。
-下面是需求分析：
-{requirement_analysis}
-
-下面是用于生成用例的测试大纲：
-{outline}
-</context>
-
-<instruction>
-请根据测试大纲生成可执行测试用例。
-每条用例都要填写：case_id、directory、case_level、test_point、precondition、steps、expected_result。
-</instruction>
-
-<constraints>
-1. 输出必须是 TestCase 列表。
-2. case_id 唯一，建议使用 TC-001 递增格式。
-3. directory 体现模块路径，例如：登录/鉴权、下单/支付。
-4. steps 至少 2 步，描述清晰可执行。
-5. case_level 仅可为 P0/P1/P2/P3。
-6. 不要输出解释文字。
-</constraints>
-""".strip()
+        _load_prompt_template("generate_cases_skill.md")
     )
 
     result = await _invoke_structured_output(

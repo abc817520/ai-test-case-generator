@@ -24,6 +24,7 @@ def build_initial_state() -> TestCaseState:
         "modified_outline": [],
         "test_cases": [],
         "modified_test_cases": [],
+        "excel_output_path": "",
     }
 
 
@@ -100,6 +101,7 @@ def main() -> None:
             {
                 "modified_outline": final_state.get("modified_outline"),
                 "test_cases": final_state.get("test_cases"),
+                "excel_output_path": final_state.get("excel_output_path"),
             }
         )
 

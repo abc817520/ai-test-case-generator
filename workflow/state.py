@@ -27,3 +27,6 @@ class TestCaseState(TypedDict):
 
     # 人工修改后的测试用例（人工补充、修订、确认后的最终用例集合）
     modified_test_cases: list[dict]
+
+    # 导出的 Excel 文件路径
+    excel_output_path: str

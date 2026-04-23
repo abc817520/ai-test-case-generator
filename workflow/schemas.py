@@ -7,8 +7,8 @@ class TestPoint(BaseModel):
     """测试点结构化定义。"""
 
     name: str = Field(description="测试点名称")
-    test_type: Literal["功能", "性能", "安全"] = Field(
-        description="测试类型，可选值：功能/性能/安全"
+    test_type: Literal["功能", "性能", "安全", "兼容性"] = Field(
+        description="测试类型，可选值：功能/性能/安全/兼容性"
     )
     priority: Literal["P0", "P1", "P2", "P3"] = Field(
         description="测试点优先级，可选值：P0/P1/P2/P3"
