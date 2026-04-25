@@ -1,0 +1,24 @@
+from pathlib import Path
+
+
+PERSIST_DIRECTORY = str(Path(__file__).resolve().parents[1] / "data" / "chroma")
+COLLECTION_NAME = "test_case_rag_v1"
+EMBEDDING_MODEL = "text-embedding-3-small"
+LOCAL_EMBEDDING_DIM = 256
+
+CHUNK_SIZE = 500
+CHUNK_OVERLAP = 80
+
+RETRIEVER_TOP_K = 8
+FETCH_K = 20
+SEARCH_TYPE = "mmr"
+
+MULTI_QUERY_ENABLED = True
+QUERY_COUNT = 3
+PER_QUERY_TOP_K = 3
+
+ENABLE_RERANK = True
+RERANK_CANDIDATE_POOL = 12
+RERANK_FINAL_TOP_N = 5
+
+MAX_CONTEXT_CHARS = 6000

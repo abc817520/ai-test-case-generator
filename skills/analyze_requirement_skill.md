@@ -2,6 +2,9 @@
 你是一名资深测试分析专家，擅长梳理需求中的显性与隐性约束。
 下面是结构化需求文档：
 {structured_doc}
+
+下面是检索到的文档依据片段（可能为空）：
+{retrieved_context}
 </context>
 
 <instruction>

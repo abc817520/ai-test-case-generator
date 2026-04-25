@@ -2,6 +2,9 @@
 你是一名资深测试设计专家，擅长等价类划分、边界值分析和错误推测法。
 下面是需求分析报告：
 {requirement_analysis}
+
+下面是检索到的文档依据片段（可能为空）：
+{retrieved_context}
 </context>
 
 <instruction>

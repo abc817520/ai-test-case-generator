@@ -99,6 +99,25 @@ def _extract_json_object(raw_text: str) -> str:
     return text
 
 
+async def _repair_json_with_llm(
+    llm: BaseChatModel,
+    schema: type[ModelT],
+    broken_json_text: str,
+) -> str:
+    schema_text = json.dumps(schema.model_json_schema(), ensure_ascii=False)
+    repair_prompt = (
+        "你是 JSON 修复器。"
+        "请将下面的内容修复为一个严格合法的 JSON 对象。"
+        "不要输出任何解释、不要使用 Markdown 代码块。"
+        "必须满足给定 JSON Schema。"
+        f"\nJSON Schema:\n{schema_text}"
+        f"\n待修复内容:\n{broken_json_text}"
+    )
+    response = await llm.ainvoke([HumanMessage(content=repair_prompt)])
+    repaired_raw = _extract_text_content(getattr(response, "content", response))
+    return _extract_json_object(repaired_raw)
+
+
 async def _invoke_json_fallback(
     llm: BaseChatModel,
     prompt: ChatPromptTemplate,
@@ -130,9 +149,20 @@ async def _invoke_json_fallback(
         try:
             return schema.model_validate(json.loads(json_text))
         except Exception as exc:
-            raise ValueError(
-                f"{skill_name} 降级 JSON 解析失败。原始输出: {raw_text}"
-            ) from exc
+            try:
+                repaired_json_text = await _repair_json_with_llm(
+                    llm=llm,
+                    schema=schema,
+                    broken_json_text=json_text,
+                )
+                try:
+                    return schema.model_validate_json(repaired_json_text)
+                except ValidationError:
+                    return schema.model_validate(json.loads(repaired_json_text))
+            except Exception as repair_exc:
+                raise ValueError(
+                    f"{skill_name} 降级 JSON 解析失败。原始输出: {raw_text}"
+                ) from repair_exc
 
 
 async def _invoke_structured_output(
@@ -189,6 +219,7 @@ async def _invoke_structured_output(
 async def analyze_requirement_skill(
     llm: BaseChatModel,
     structured_doc: dict[str, Any],
+    retrieved_context: str = "",
 ) -> str:
     """分析结构化文档，生成需求分析报告。"""
     prompt = ChatPromptTemplate.from_template(
@@ -204,7 +235,8 @@ async def analyze_requirement_skill(
                 structured_doc,
                 ensure_ascii=False,
                 indent=2,
-            )
+            ),
+            "retrieved_context": retrieved_context,
         },
         skill_name="analyze_requirement_skill",
     )
@@ -219,6 +251,7 @@ async def analyze_requirement_skill(
 async def extract_test_points_skill(
     llm: BaseChatModel,
     requirement_analysis: str,
+    retrieved_context: str = "",
 ) -> list[TestPoint]:
     """基于需求分析提取测试点列表。"""
     prompt = ChatPromptTemplate.from_template(
@@ -229,7 +262,10 @@ async def extract_test_points_skill(
         llm=llm,
         prompt=prompt,
         schema=TestPointListOutput,
-        inputs={"requirement_analysis": requirement_analysis},
+        inputs={
+            "requirement_analysis": requirement_analysis,
+            "retrieved_context": retrieved_context,
+        },
         skill_name="extract_test_points_skill",
     )
     return result.test_points
@@ -239,6 +275,7 @@ async def generate_outline_skill(
     llm: BaseChatModel,
     requirement_analysis: str,
     test_points: list[dict[str, Any]],
+    retrieved_context: str = "",
 ) -> list[TestOutline]:
     """基于测试点生成分模块测试大纲。"""
     prompt = ChatPromptTemplate.from_template(
@@ -256,6 +293,7 @@ async def generate_outline_skill(
                 ensure_ascii=False,
                 indent=2,
             ),
+            "retrieved_context": retrieved_context,
         },
         skill_name="generate_outline_skill",
     )
@@ -266,6 +304,7 @@ async def generate_cases_skill(
     llm: BaseChatModel,
     requirement_analysis: str,
     outline_for_generation: list[dict[str, Any]],
+    retrieved_context: str = "",
 ) -> list[TestCase]:
     """基于测试大纲生成结构化测试用例。"""
     prompt = ChatPromptTemplate.from_template(
@@ -283,6 +322,7 @@ async def generate_cases_skill(
                 ensure_ascii=False,
                 indent=2,
             ),
+            "retrieved_context": retrieved_context,
         },
         skill_name="generate_cases_skill",
     )

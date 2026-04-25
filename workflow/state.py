@@ -10,6 +10,9 @@ class TestCaseState(TypedDict):
     # 结构化文档（由前期解析模块输出，通常为分层字典结构）
     structured_doc: dict
 
+    # 当前上传文档 ID（用于 RAG 过滤）
+    doc_id: str
+
     # 需求分析报告（对业务目标、范围、约束、风险点的分析结论）
     requirement_analysis: str
 
@@ -27,6 +30,9 @@ class TestCaseState(TypedDict):
 
     # 人工修改后的测试用例（人工补充、修订、确认后的最终用例集合）
     modified_test_cases: list[dict]
+
+    # 各节点检索日志（用于可观测性与前端展示）
+    retrieval_logs: list[dict]
 
     # 导出的 Excel 文件路径
     excel_output_path: str

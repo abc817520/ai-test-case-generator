@@ -5,6 +5,9 @@
 
 下面是已提取的测试点列表：
 {test_points}
+
+下面是检索到的文档依据片段（可能为空）：
+{retrieved_context}
 </context>
 
 <instruction>

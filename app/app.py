@@ -20,6 +20,8 @@ if str(WORKFLOW_DIR) not in sys.path:
 
 from utils.document_parser.docx_parser import parse_docx
 from utils.document_parser.md_parser import parse_markdown
+from rag.ingest import index_document
+from rag.ingest import index_testcase_knowledge_file
 from workflow import create_workflow
 
 
@@ -46,12 +48,14 @@ def _default_state() -> dict[str, Any]:
     return {
         "document": "",
         "structured_doc": {},
+        "doc_id": "",
         "requirement_analysis": "",
         "test_points": [],
         "test_outline": [],
         "modified_outline": [],
         "test_cases": [],
         "modified_test_cases": [],
+        "retrieval_logs": [],
         "excel_output_path": "",
     }
 
@@ -84,6 +88,10 @@ def _ensure_session() -> None:
         st.session_state.source_document = ""
     if "source_structured_doc" not in st.session_state:
         st.session_state.source_structured_doc = {}
+    if "source_file_name" not in st.session_state:
+        st.session_state.source_file_name = ""
+    if "source_doc_id" not in st.session_state:
+        st.session_state.source_doc_id = ""
     if "requirement_editor_text" not in st.session_state:
         st.session_state.requirement_editor_text = ""
     if "test_points_table" not in st.session_state:
@@ -94,6 +102,10 @@ def _ensure_session() -> None:
         st.session_state.test_cases_table = []
     if "excel_output_path" not in st.session_state:
         st.session_state.excel_output_path = ""
+    if "enable_multi_query" not in st.session_state:
+        st.session_state.enable_multi_query = True
+    if "enable_rerank" not in st.session_state:
+        st.session_state.enable_rerank = True
 
 
 def _build_config(llm: ChatOpenAI) -> dict[str, Any]:
@@ -101,6 +113,8 @@ def _build_config(llm: ChatOpenAI) -> dict[str, Any]:
         "configurable": {
             "thread_id": st.session_state.thread_id,
             "llm": llm,
+            "enable_multi_query": st.session_state.enable_multi_query,
+            "enable_rerank": st.session_state.enable_rerank,
         }
     }
 
@@ -252,6 +266,8 @@ def _reset_flow() -> None:
     st.session_state.thread_id = f"web_{uuid.uuid4().hex}"
     st.session_state.source_document = ""
     st.session_state.source_structured_doc = {}
+    st.session_state.source_file_name = ""
+    st.session_state.source_doc_id = ""
     st.session_state.requirement_editor_text = ""
     st.session_state.test_points_table = []
     st.session_state.outline_table = []
@@ -327,6 +343,7 @@ def _replay_to_phase(graph: Any, llm: ChatOpenAI, target_phase: str) -> None:
     init_state = _default_state()
     init_state["document"] = st.session_state.source_document
     init_state["structured_doc"] = st.session_state.source_structured_doc
+    init_state["doc_id"] = st.session_state.source_doc_id
 
     for index in range(invoke_count):
         payload = init_state if index == 0 else None
@@ -388,13 +405,147 @@ def _render_upload_page(graph: Any, llm: ChatOpenAI) -> None:
             return
 
         try:
+            doc_id = f"web_{uuid.uuid4().hex}"
             document, structured_doc = _parse_uploaded_document(uploaded_file)
+            indexed_chunks = index_document(
+                doc_id=doc_id,
+                source_name=uploaded_file.name,
+                structured_doc=structured_doc,
+            )
             st.session_state.source_document = document
             st.session_state.source_structured_doc = structured_doc
+            st.session_state.source_file_name = uploaded_file.name
+            st.session_state.source_doc_id = doc_id
+            st.info(f"文档入库完成，chunk 数：{indexed_chunks}")
             _replay_to_phase(graph, llm, PHASE_REQUIREMENT)
             st.rerun()
         except Exception as exc:
             st.error(f"启动流程失败：{exc}")
+
+
+def _render_testcase_kb_uploader() -> None:
+    st.subheader("测试用例知识库入库")
+    uploaded_files = st.file_uploader(
+        "上传历史测试用例（md/docx，可多选）",
+        type=["md", "docx"],
+        accept_multiple_files=True,
+        key="testcase_kb_uploader",
+    )
+    module = st.text_input("module（可选）", key="testcase_kb_module")
+    test_type = st.selectbox(
+        "test_type（可选）",
+        options=["", "功能", "性能", "安全", "兼容性"],
+        index=0,
+        key="testcase_kb_test_type",
+    )
+    priority = st.selectbox(
+        "priority（可选）",
+        options=["", "P0", "P1", "P2", "P3"],
+        index=0,
+        key="testcase_kb_priority",
+    )
+
+    if st.button("入库测试用例", key="index_testcase_kb_btn"):
+        if not uploaded_files:
+            st.warning("请先上传至少一个测试用例文件。")
+            return
+
+        results: list[tuple[str, bool, str]] = []
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_root = Path(tmp_dir)
+            for uploaded in uploaded_files:
+                file_name = uploaded.name
+                suffix = Path(file_name).suffix.lower()
+                if suffix not in {".md", ".docx"}:
+                    results.append((file_name, False, "仅支持 md/docx"))
+                    continue
+
+                tmp_path = tmp_root / file_name
+                tmp_path.write_bytes(uploaded.getvalue())
+                try:
+                    chunks = index_testcase_knowledge_file(
+                        file_path=tmp_path,
+                        module=module.strip(),
+                        test_type=test_type.strip(),
+                        priority=priority.strip(),
+                    )
+                    results.append((file_name, True, f"成功，chunks={chunks}"))
+                except Exception as exc:
+                    results.append((file_name, False, f"失败：{exc}"))
+
+        st.markdown("**入库结果**")
+        for file_name, ok, message in results:
+            if ok:
+                st.success(f"{file_name}: {message}")
+            else:
+                st.error(f"{file_name}: {message}")
+
+
+def _render_retrieval_evidence(values: dict[str, Any], phase: str, title: str) -> None:
+    logs = values.get("retrieval_logs", [])
+    if not isinstance(logs, list) or not logs:
+        return
+
+    latest = None
+    for log in reversed(logs):
+        if isinstance(log, dict) and str(log.get("phase", "")) == phase:
+            latest = log
+            break
+    if latest is None:
+        return
+
+    with st.expander(title, expanded=False):
+        st.caption(f"Query: {latest.get('query', '')}")
+        expanded_queries = latest.get("expanded_queries", [])
+        if isinstance(expanded_queries, list) and expanded_queries:
+            st.caption(f"Expanded Queries: {len(expanded_queries)}")
+            for query in expanded_queries[:3]:
+                st.code(str(query), language="text")
+        pre_dedup_count = latest.get("pre_dedup_count")
+        post_dedup_count = latest.get("post_dedup_count")
+        rerank_enabled = latest.get("rerank_enabled")
+        rerank_latency_ms = latest.get("rerank_latency_ms", 0)
+        if pre_dedup_count is not None and post_dedup_count is not None:
+            st.caption(
+                f"候选数: pre_dedup={pre_dedup_count}, post_dedup={post_dedup_count}"
+            )
+        st.caption(f"Rerank: enabled={rerank_enabled}, latency={rerank_latency_ms}ms")
+
+        citations = latest.get("citations", [])
+        if isinstance(citations, list) and citations:
+            st.markdown("**Citations**")
+            for idx, citation in enumerate(citations[:3], start=1):
+                if not isinstance(citation, dict):
+                    continue
+                st.markdown(
+                    f"{idx}. `{citation.get('chunk_id', '')}` | "
+                    f"`{citation.get('section_path', '')}` | "
+                    f"`{citation.get('source_name', '')}` | "
+                    f"score={citation.get('score', 0.0)}"
+                )
+
+        hits = latest.get("hits", [])
+        if not isinstance(hits, list) or not hits:
+            st.write("未检索到依据片段。")
+            return
+        for idx, hit in enumerate(hits[:3], start=1):
+            if not isinstance(hit, dict):
+                continue
+            chunk_id = str(hit.get("chunk_id", ""))
+            doc_type = str(hit.get("doc_type", ""))
+            section_path = str(hit.get("section_path", ""))
+            source_name = str(hit.get("source_name", ""))
+            score = hit.get("score", 0.0)
+            preview = str(hit.get("text_preview", "")).strip()
+            st.markdown(
+                f"{idx}. `{chunk_id}` | `{doc_type}` | `{section_path}` | `{source_name}` | score={score}"
+            )
+            if preview:
+                st.caption(preview)
+            full_text = str(hit.get("text_full", "")).strip()
+            if full_text:
+                with st.expander(f"查看全文 #{idx}", expanded=False):
+                    st.text(full_text)
 
 
 def _render_requirement_page(graph: Any, llm: ChatOpenAI) -> None:
@@ -432,6 +583,8 @@ def _render_requirement_page(graph: Any, llm: ChatOpenAI) -> None:
             st.rerun()
         except Exception as exc:
             st.error(f"重新生成失败：{exc}")
+
+    _render_retrieval_evidence(values, "analyze_requirement", "本阶段依据片段")
 
 
 def _render_test_points_page(graph: Any, llm: ChatOpenAI) -> None:
@@ -481,6 +634,8 @@ def _render_test_points_page(graph: Any, llm: ChatOpenAI) -> None:
             st.rerun()
         except Exception as exc:
             st.error(f"重新生成失败：{exc}")
+
+    _render_retrieval_evidence(values, "extract_test_points", "本阶段依据片段")
 
 
 def _render_outline_page(graph: Any, llm: ChatOpenAI) -> None:
@@ -534,9 +689,13 @@ def _render_outline_page(graph: Any, llm: ChatOpenAI) -> None:
         except Exception as exc:
             st.error(f"重新生成失败：{exc}")
 
+    _render_retrieval_evidence(values, "generate_outline", "本阶段依据片段")
+
 
 def _render_case_page(graph: Any, llm: ChatOpenAI) -> None:
     st.subheader("5. 审核测试用例")
+    config = _build_config(llm)
+    values = _get_state_values(graph, config)
 
     edited_data = st.data_editor(
         st.session_state.test_cases_table,
@@ -573,6 +732,9 @@ def _render_case_page(graph: Any, llm: ChatOpenAI) -> None:
             st.rerun()
         except Exception as exc:
             st.error(f"重新生成失败：{exc}")
+
+    _render_retrieval_evidence(values, "generate_cases_requirement", "需求依据片段")
+    _render_retrieval_evidence(values, "generate_cases_testcase", "历史用例参考片段")
 
 
 def _render_download_page() -> None:
@@ -617,6 +779,18 @@ def main() -> None:
     st.title("AI 测试用例生成器")
 
     _ensure_session()
+    with st.sidebar:
+        st.subheader("RAG 设置")
+        st.session_state.enable_multi_query = st.toggle(
+            "启用 Multi-Query",
+            value=st.session_state.enable_multi_query,
+        )
+        st.session_state.enable_rerank = st.toggle(
+            "启用 Rerank",
+            value=st.session_state.enable_rerank,
+        )
+        st.divider()
+        _render_testcase_kb_uploader()
 
     try:
         graph, llm = get_graph_and_llm()

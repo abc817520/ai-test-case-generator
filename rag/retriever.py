@@ -1,0 +1,244 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+from rag.config import (
+    ENABLE_RERANK,
+    FETCH_K,
+    MAX_CONTEXT_CHARS,
+    MULTI_QUERY_ENABLED,
+    PER_QUERY_TOP_K,
+    QUERY_COUNT,
+    RERANK_CANDIDATE_POOL,
+    RERANK_FINAL_TOP_N,
+    RETRIEVER_TOP_K,
+    SEARCH_TYPE,
+)
+from rag.query_expander import expand_query
+from rag.reranker import rerank
+from rag.schemas import Citation, RetrievedChunk
+from rag.store import get_vector_store
+
+
+@dataclass
+class RetrievalMeta:
+    expanded_queries: list[str]
+    pre_dedup_count: int
+    post_dedup_count: int
+    rerank_enabled: bool
+    rerank_latency_ms: int
+    rerank_degraded: bool
+
+
+def _search_once(
+    query_text: str,
+    doc_id: str,
+    doc_type: str,
+    k: int,
+    extra_filter: dict[str, str] | None = None,
+) -> list[RetrievedChunk]:
+    vector_store = get_vector_store()
+    raw_results: list[tuple[Any, float]]
+    merged_filter: dict[str, str] = {"doc_type": doc_type}
+    if doc_type == "requirement":
+        merged_filter["doc_id"] = doc_id
+    if extra_filter:
+        merged_filter.update(extra_filter)
+    if len(merged_filter) == 1:
+        where_filter: dict[str, Any] = merged_filter
+    else:
+        where_filter = {
+            "$and": [{key: value} for key, value in merged_filter.items()]
+        }
+
+    if SEARCH_TYPE == "mmr":
+        docs = vector_store.max_marginal_relevance_search(
+            query=query_text,
+            k=k,
+            fetch_k=FETCH_K,
+            filter=where_filter,
+        )
+        raw_results = [(doc, 0.0) for doc in docs]
+    else:
+        raw_results = vector_store.similarity_search_with_relevance_scores(
+            query=query_text,
+            k=k,
+            filter=where_filter,
+        )
+
+    results: list[RetrievedChunk] = []
+    for doc, score in raw_results:
+        metadata = getattr(doc, "metadata", {}) or {}
+        results.append(
+            RetrievedChunk(
+                chunk_id=str(metadata.get("chunk_id", "")),
+                doc_id=str(metadata.get("doc_id", doc_id)),
+                doc_type=str(metadata.get("doc_type", doc_type)),
+                source_name=str(metadata.get("source_name", "")),
+                section_path=str(metadata.get("section_path", "ROOT")),
+                text=str(getattr(doc, "page_content", "")),
+                score=float(score),
+                query=query_text,
+            )
+        )
+    return results
+
+
+def _dedup_keep_best(chunks: list[RetrievedChunk]) -> list[RetrievedChunk]:
+    best: dict[str, RetrievedChunk] = {}
+    for chunk in chunks:
+        existing = best.get(chunk.chunk_id)
+        if existing is None or chunk.score > existing.score:
+            best[chunk.chunk_id] = chunk
+    return sorted(best.values(), key=lambda item: item.score, reverse=True)
+
+
+def retrieve_context_with_meta(
+    query: str,
+    doc_id: str,
+    doc_type: str = "requirement",
+    top_k: int = 5,
+    multi_query: bool | None = None,
+    enable_rerank: bool | None = None,
+    extra_filter: dict[str, str] | None = None,
+) -> tuple[list[RetrievedChunk], RetrievalMeta]:
+    query_text = str(query).strip()
+    if not query_text:
+        return (
+            [],
+            RetrievalMeta(
+                expanded_queries=[],
+                pre_dedup_count=0,
+                post_dedup_count=0,
+                rerank_enabled=bool(enable_rerank) if enable_rerank is not None else ENABLE_RERANK,
+                rerank_latency_ms=0,
+                rerank_degraded=False,
+            ),
+        )
+
+    final_top_k = top_k if top_k > 0 else RETRIEVER_TOP_K
+    mq_enabled = MULTI_QUERY_ENABLED if multi_query is None else multi_query
+    rerank_enabled = ENABLE_RERANK if enable_rerank is None else enable_rerank
+
+    if mq_enabled:
+        expanded_queries = expand_query(query_text, max_queries=QUERY_COUNT)
+    else:
+        expanded_queries = [query_text]
+
+    all_candidates: list[RetrievedChunk] = []
+    per_query_k = PER_QUERY_TOP_K if mq_enabled else final_top_k
+    for expanded in expanded_queries:
+        all_candidates.extend(
+            _search_once(
+                query_text=expanded,
+                doc_id=doc_id,
+                doc_type=doc_type,
+                k=per_query_k,
+                extra_filter=extra_filter,
+            )
+        )
+
+    pre_dedup_count = len(all_candidates)
+    deduped = _dedup_keep_best(all_candidates)
+    post_dedup_count = len(deduped)
+
+    candidate_pool = deduped[:RERANK_CANDIDATE_POOL]
+    rerank_result = rerank(
+        query=query_text,
+        candidates=candidate_pool,
+        enable_rerank=rerank_enabled,
+        final_top_n=min(RERANK_FINAL_TOP_N, final_top_k),
+    )
+    selected = rerank_result.items
+
+    if not rerank_enabled:
+        selected = deduped[:final_top_k]
+    elif not selected:
+        selected = deduped[:final_top_k]
+
+    meta = RetrievalMeta(
+        expanded_queries=expanded_queries,
+        pre_dedup_count=pre_dedup_count,
+        post_dedup_count=post_dedup_count,
+        rerank_enabled=rerank_result.rerank_enabled,
+        rerank_latency_ms=rerank_result.rerank_latency_ms,
+        rerank_degraded=rerank_result.degraded,
+    )
+    return selected[:final_top_k], meta
+
+
+def retrieve_context(
+    query: str,
+    doc_id: str,
+    doc_type: str = "requirement",
+    top_k: int = 5,
+) -> list[RetrievedChunk]:
+    chunks, _meta = retrieve_context_with_meta(
+        query=query,
+        doc_id=doc_id,
+        doc_type=doc_type,
+        top_k=top_k,
+    )
+    return chunks
+
+
+def retrieve_testcase_context_with_meta(
+    query: str,
+    top_k: int = 5,
+    multi_query: bool | None = None,
+    enable_rerank: bool | None = None,
+    module: str = "",
+    test_type: str = "",
+    priority: str = "",
+) -> tuple[list[RetrievedChunk], RetrievalMeta]:
+    extra_filter: dict[str, str] = {}
+    if module:
+        extra_filter["module"] = module
+    if test_type:
+        extra_filter["test_type"] = test_type
+    if priority:
+        extra_filter["priority"] = priority
+    return retrieve_context_with_meta(
+        query=query,
+        doc_id="",
+        doc_type="testcase",
+        top_k=top_k,
+        multi_query=multi_query,
+        enable_rerank=enable_rerank,
+        extra_filter=extra_filter if extra_filter else None,
+    )
+
+
+def format_retrieved_context(
+    chunks: list[RetrievedChunk],
+    max_chars: int = MAX_CONTEXT_CHARS,
+) -> str:
+    if not chunks:
+        return ""
+
+    lines: list[str] = []
+    current_len = 0
+    for chunk in chunks:
+        line = f"[{chunk.chunk_id}] [{chunk.section_path}] {chunk.text}".strip()
+        if not line:
+            continue
+        next_len = current_len + len(line) + 1
+        if next_len > max_chars:
+            break
+        lines.append(line)
+        current_len = next_len
+    return "\n".join(lines)
+
+
+def build_citations(chunks: list[RetrievedChunk], limit: int = 5) -> list[dict[str, Any]]:
+    citations: list[dict[str, Any]] = []
+    for chunk in chunks[:limit]:
+        citation = Citation(
+            chunk_id=chunk.chunk_id,
+            section_path=chunk.section_path,
+            source_name=chunk.source_name,
+            score=chunk.score,
+        )
+        citations.append(citation.model_dump())
+    return citations

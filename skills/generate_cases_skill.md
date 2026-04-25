@@ -5,11 +5,15 @@
 
 下面是用于生成用例的测试大纲：
 {outline}
+
+下面是检索到的文档依据片段（可能为空）：
+{retrieved_context}
 </context>
 
 <instruction>
 请根据测试大纲生成可执行测试用例。
 每条用例都要填写：case_id、directory、case_level、test_point、precondition、steps、expected_result。
+可以参考历史用例片段的覆盖思路与表达方式，但禁止逐句照抄，必须结合当前需求重写。
 </instruction>
 
 <constraints>
