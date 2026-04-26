@@ -40,9 +40,11 @@ def _append_retrieval_log(
     chunks: list[Any],
     citations: list[dict[str, Any]],
     latency_ms: int,
+    rerank_mode: str,
     rerank_enabled: bool,
     rerank_latency_ms: int,
     rerank_degraded: bool,
+    rerank_degraded_reason: str,
 ) -> list[dict[str, Any]]:
     logs = list(state.get("retrieval_logs", []))
     logs.append(
@@ -67,9 +69,11 @@ def _append_retrieval_log(
             ],
             "citations": citations,
             "latency_ms": latency_ms,
+            "rerank_mode": rerank_mode,
             "rerank_enabled": rerank_enabled,
             "rerank_latency_ms": rerank_latency_ms,
             "rerank_degraded": rerank_degraded,
+            "rerank_degraded_reason": rerank_degraded_reason,
         }
     )
     return logs
@@ -119,9 +123,11 @@ def _build_retrieval_for_phase(
         chunks=chunks,
         citations=citations,
         latency_ms=elapsed_ms,
+        rerank_mode=meta.rerank_mode,
         rerank_enabled=meta.rerank_enabled,
         rerank_latency_ms=meta.rerank_latency_ms,
         rerank_degraded=meta.rerank_degraded,
+        rerank_degraded_reason=meta.rerank_degraded_reason,
     )
     return format_retrieved_context(chunks), logs, elapsed_ms
 
@@ -148,7 +154,7 @@ def analyze_requirement_node(
     """调用需求分析 Skill，产出需求分析文本。"""
     print("--- 执行需求分析 Node ---")
     llm = _get_llm_from_config(config)
-    query = "请提取需求核心流程、依赖、约束"
+    query = "请提取核心业务流程、前置依赖、关键约束、异常处理和隐含非功能需求"
     retrieved_context, retrieval_logs, _ = _build_retrieval_for_phase(
         state=state,
         config=config,
@@ -175,7 +181,10 @@ def extract_test_points_node(
     """调用测试点提取 Skill，产出测试点列表。"""
     print("--- 执行测试点提取 Node ---")
     llm = _get_llm_from_config(config)
-    query = f"{_truncate_for_query(state['requirement_analysis'])}\n请覆盖正常/边界/异常"
+    query = (
+        f"{_truncate_for_query(state['requirement_analysis'])}\n"
+        "请围绕正常流程、边界值、异常场景、权限控制和数据校验提取可测试点"
+    )
     retrieved_context, retrieval_logs, _ = _build_retrieval_for_phase(
         state=state,
         config=config,
@@ -204,6 +213,7 @@ def generate_outline_node(
     llm = _get_llm_from_config(config)
     query = (
         f"{_truncate_for_query(state['requirement_analysis'])}\n"
+        "请根据业务模块、用户路径、状态流转和异常分支整理测试结构\n"
         f"测试点摘要:\n{_truncate_for_query(str(state['test_points']))}"
     )
     retrieved_context, retrieval_logs, _ = _build_retrieval_for_phase(
@@ -238,20 +248,26 @@ def generate_cases_node(
     if not outline_for_generation:
         outline_for_generation = state["test_outline"]
 
-    query = (
+    requirement_query = (
         f"{_truncate_for_query(state['requirement_analysis'])}\n"
+        "请检索与该功能点相关的主流程、前置条件、状态变化、校验规则和异常约束\n"
+        f"测试大纲摘要:\n{_truncate_for_query(str(outline_for_generation))}"
+    )
+    testcase_query = (
+        f"{_truncate_for_query(state['requirement_analysis'])}\n"
+        "请检索相似功能的测试步骤写法、前置条件表达、预期结果描述和异常场景覆盖方式\n"
         f"测试大纲摘要:\n{_truncate_for_query(str(outline_for_generation))}"
     )
     requirement_context, retrieval_logs, requirement_latency_ms = _build_retrieval_for_phase(
         state=state,
         config=config,
         phase="generate_cases_requirement",
-        query=query,
+        query=requirement_query,
         doc_type="requirement",
     )
     testcase_start = time.time()
     testcase_chunks, testcase_meta = retrieve_testcase_context_with_meta(
-        query=query,
+        query=testcase_query,
         multi_query=(
             config.get("configurable", {}).get("enable_multi_query", None)
             if config is not None
@@ -269,16 +285,18 @@ def generate_cases_node(
     retrieval_logs = _append_retrieval_log(
         state={**state, "retrieval_logs": retrieval_logs},
         phase="generate_cases_testcase",
-        query=query,
+        query=testcase_query,
         expanded_queries=testcase_meta.expanded_queries,
         pre_dedup_count=testcase_meta.pre_dedup_count,
         post_dedup_count=testcase_meta.post_dedup_count,
         chunks=testcase_chunks,
         citations=testcase_citations,
         latency_ms=testcase_elapsed_ms,
+        rerank_mode=testcase_meta.rerank_mode,
         rerank_enabled=testcase_meta.rerank_enabled,
         rerank_latency_ms=testcase_meta.rerank_latency_ms,
         rerank_degraded=testcase_meta.rerank_degraded,
+        rerank_degraded_reason=testcase_meta.rerank_degraded_reason,
     )
     combined_context = requirement_context
     if testcase_context:

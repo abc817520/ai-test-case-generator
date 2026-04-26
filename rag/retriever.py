@@ -11,7 +11,11 @@ from rag.config import (
     PER_QUERY_TOP_K,
     QUERY_COUNT,
     RERANK_CANDIDATE_POOL,
+    RERANK_CROSS_ENCODER_LOCAL_FILES_ONLY,
+    RERANK_CROSS_ENCODER_MODEL,
     RERANK_FINAL_TOP_N,
+    RERANK_MODE,
+    RERANK_TIMEOUT_MS,
     RETRIEVER_TOP_K,
     SEARCH_TYPE,
 )
@@ -26,9 +30,11 @@ class RetrievalMeta:
     expanded_queries: list[str]
     pre_dedup_count: int
     post_dedup_count: int
+    rerank_mode: str
     rerank_enabled: bool
     rerank_latency_ms: int
     rerank_degraded: bool
+    rerank_degraded_reason: str
 
 
 def _search_once(
@@ -111,9 +117,11 @@ def retrieve_context_with_meta(
                 expanded_queries=[],
                 pre_dedup_count=0,
                 post_dedup_count=0,
+                rerank_mode="disabled" if enable_rerank is False else RERANK_MODE,
                 rerank_enabled=bool(enable_rerank) if enable_rerank is not None else ENABLE_RERANK,
                 rerank_latency_ms=0,
                 rerank_degraded=False,
+                rerank_degraded_reason="",
             ),
         )
 
@@ -148,6 +156,10 @@ def retrieve_context_with_meta(
         query=query_text,
         candidates=candidate_pool,
         enable_rerank=rerank_enabled,
+        mode=RERANK_MODE,
+        cross_encoder_model=RERANK_CROSS_ENCODER_MODEL,
+        cross_encoder_local_files_only=RERANK_CROSS_ENCODER_LOCAL_FILES_ONLY,
+        timeout_ms=RERANK_TIMEOUT_MS,
         final_top_n=min(RERANK_FINAL_TOP_N, final_top_k),
     )
     selected = rerank_result.items
@@ -161,9 +173,11 @@ def retrieve_context_with_meta(
         expanded_queries=expanded_queries,
         pre_dedup_count=pre_dedup_count,
         post_dedup_count=post_dedup_count,
+        rerank_mode=rerank_result.rerank_mode,
         rerank_enabled=rerank_result.rerank_enabled,
         rerank_latency_ms=rerank_result.rerank_latency_ms,
         rerank_degraded=rerank_result.degraded,
+        rerank_degraded_reason=rerank_result.degraded_reason,
     )
     return selected[:final_top_k], meta
 

@@ -503,13 +503,21 @@ def _render_retrieval_evidence(values: dict[str, Any], phase: str, title: str) -
                 st.code(str(query), language="text")
         pre_dedup_count = latest.get("pre_dedup_count")
         post_dedup_count = latest.get("post_dedup_count")
+        rerank_mode = latest.get("rerank_mode", "unknown")
         rerank_enabled = latest.get("rerank_enabled")
         rerank_latency_ms = latest.get("rerank_latency_ms", 0)
+        rerank_degraded = latest.get("rerank_degraded", False)
+        rerank_degraded_reason = str(latest.get("rerank_degraded_reason", "")).strip()
         if pre_dedup_count is not None and post_dedup_count is not None:
             st.caption(
                 f"候选数: pre_dedup={pre_dedup_count}, post_dedup={post_dedup_count}"
             )
-        st.caption(f"Rerank: enabled={rerank_enabled}, latency={rerank_latency_ms}ms")
+        st.caption(
+            f"Rerank: mode={rerank_mode}, enabled={rerank_enabled}, "
+            f"latency={rerank_latency_ms}ms, degraded={rerank_degraded}"
+        )
+        if rerank_degraded_reason:
+            st.caption(f"Rerank fallback reason: {rerank_degraded_reason}")
 
         citations = latest.get("citations", [])
         if isinstance(citations, list) and citations:

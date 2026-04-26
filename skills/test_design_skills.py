@@ -99,6 +99,39 @@ def _extract_json_object(raw_text: str) -> str:
     return text
 
 
+def _sanitize_json_text(json_text: str) -> str:
+    """对常见脏输出做轻量清洗，尽量不改动合法 JSON。"""
+    sanitized = json_text.strip()
+    if not sanitized:
+        return sanitized
+
+    sanitized = sanitized.replace("\u201c", '"').replace("\u201d", '"')
+    sanitized = sanitized.replace("\u2018", "'").replace("\u2019", "'")
+    sanitized = sanitized.replace("\ufeff", "")
+
+    lines = sanitized.splitlines()
+    cleaned_lines: list[str] = []
+    for line in lines:
+        if '"' not in line or ":" not in line:
+            cleaned_lines.append(line)
+            continue
+
+        colon_index = line.find(":")
+        first_quote_after_colon = line.find('"', colon_index)
+        last_quote = line.rfind('"')
+        if first_quote_after_colon == -1 or last_quote <= first_quote_after_colon:
+            cleaned_lines.append(line)
+            continue
+
+        value = line[first_quote_after_colon + 1 : last_quote]
+        escaped_value = value.replace("\\", "\\\\").replace('"', '\\"')
+        cleaned_lines.append(
+            f"{line[:first_quote_after_colon + 1]}{escaped_value}{line[last_quote:]}"
+        )
+
+    return "\n".join(cleaned_lines)
+
+
 async def _repair_json_with_llm(
     llm: BaseChatModel,
     schema: type[ModelT],
@@ -142,18 +175,19 @@ async def _invoke_json_fallback(
     response = await llm.ainvoke(messages)
     raw_text = _extract_text_content(getattr(response, "content", response))
     json_text = _extract_json_object(raw_text)
+    sanitized_json_text = _sanitize_json_text(json_text)
 
     try:
-        return schema.model_validate_json(json_text)
+        return schema.model_validate_json(sanitized_json_text)
     except ValidationError:
         try:
-            return schema.model_validate(json.loads(json_text))
+            return schema.model_validate(json.loads(sanitized_json_text))
         except Exception as exc:
             try:
                 repaired_json_text = await _repair_json_with_llm(
                     llm=llm,
                     schema=schema,
-                    broken_json_text=json_text,
+                    broken_json_text=sanitized_json_text,
                 )
                 try:
                     return schema.model_validate_json(repaired_json_text)
