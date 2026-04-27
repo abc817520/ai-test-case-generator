@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
+import re
 from typing import Any
 
 from rag.config import (
+    BM25_TOP_K,
     ENABLE_RERANK,
     FETCH_K,
+    HYBRID_SEARCH_ENABLED,
     MAX_CONTEXT_CHARS,
     MULTI_QUERY_ENABLED,
     PER_QUERY_TOP_K,
     QUERY_COUNT,
+    RRF_K,
     RERANK_CANDIDATE_POOL,
     RERANK_CROSS_ENCODER_LOCAL_FILES_ONLY,
     RERANK_CROSS_ENCODER_MODEL,
@@ -37,15 +42,11 @@ class RetrievalMeta:
     rerank_degraded_reason: str
 
 
-def _search_once(
-    query_text: str,
+def _build_where_filter(
     doc_id: str,
     doc_type: str,
-    k: int,
     extra_filter: dict[str, str] | None = None,
-) -> list[RetrievedChunk]:
-    vector_store = get_vector_store()
-    raw_results: list[tuple[Any, float]]
+) -> dict[str, Any]:
     merged_filter: dict[str, str] = {"doc_type": doc_type}
     if doc_type == "requirement":
         merged_filter["doc_id"] = doc_id
@@ -57,6 +58,43 @@ def _search_once(
         where_filter = {
             "$and": [{key: value} for key, value in merged_filter.items()]
         }
+    return where_filter
+
+
+def _build_chunk(
+    doc: Any,
+    score: float,
+    query_text: str,
+    doc_id: str,
+    doc_type: str,
+) -> RetrievedChunk:
+    metadata = getattr(doc, "metadata", {}) or {}
+    return RetrievedChunk(
+        chunk_id=str(metadata.get("chunk_id", "")),
+        doc_id=str(metadata.get("doc_id", doc_id)),
+        doc_type=str(metadata.get("doc_type", doc_type)),
+        source_name=str(metadata.get("source_name", "")),
+        section_path=str(metadata.get("section_path", "ROOT")),
+        text=str(getattr(doc, "page_content", "")),
+        score=float(score),
+        query=query_text,
+    )
+
+
+def _vector_search_once(
+    query_text: str,
+    doc_id: str,
+    doc_type: str,
+    k: int,
+    extra_filter: dict[str, str] | None = None,
+) -> list[RetrievedChunk]:
+    vector_store = get_vector_store()
+    raw_results: list[tuple[Any, float]]
+    where_filter = _build_where_filter(
+        doc_id=doc_id,
+        doc_type=doc_type,
+        extra_filter=extra_filter,
+    )
 
     if SEARCH_TYPE == "mmr":
         docs = vector_store.max_marginal_relevance_search(
@@ -75,20 +113,174 @@ def _search_once(
 
     results: list[RetrievedChunk] = []
     for doc, score in raw_results:
-        metadata = getattr(doc, "metadata", {}) or {}
+        results.append(_build_chunk(doc, score, query_text, doc_id, doc_type))
+    return results
+
+
+def _tokenize_for_bm25(text: str) -> list[str]:
+    return re.findall(r"\w+|[\u4e00-\u9fff]", text.lower())
+
+
+def _bm25_search_once(
+    query_text: str,
+    doc_id: str,
+    doc_type: str,
+    k: int,
+    extra_filter: dict[str, str] | None = None,
+) -> list[RetrievedChunk]:
+    vector_store = get_vector_store()
+    where_filter = _build_where_filter(
+        doc_id=doc_id,
+        doc_type=doc_type,
+        extra_filter=extra_filter,
+    )
+    payload = vector_store.get(
+        where=where_filter,
+        include=["documents", "metadatas"],
+    )
+    documents = payload.get("documents", []) or []
+    metadatas = payload.get("metadatas", []) or []
+    if not documents or not metadatas:
+        return []
+
+    query_terms = _tokenize_for_bm25(query_text)
+    if not query_terms:
+        return []
+
+    tokenized_docs: list[list[str]] = []
+    term_doc_freq: dict[str, int] = {}
+    doc_lengths: list[int] = []
+    for text in documents:
+        tokens = _tokenize_for_bm25(str(text))
+        tokenized_docs.append(tokens)
+        doc_lengths.append(len(tokens))
+        seen: set[str] = set()
+        for token in tokens:
+            if token not in seen:
+                term_doc_freq[token] = term_doc_freq.get(token, 0) + 1
+                seen.add(token)
+
+    doc_count = len(tokenized_docs)
+    if doc_count == 0:
+        return []
+    avg_doc_len = sum(doc_lengths) / doc_count if doc_lengths else 0.0
+    if avg_doc_len <= 0:
+        return []
+
+    k1 = 1.5
+    b = 0.75
+    scored: list[RetrievedChunk] = []
+    for text, metadata, tokens, doc_len in zip(documents, metadatas, tokenized_docs, doc_lengths):
+        if not tokens:
+            continue
+        tf: dict[str, int] = {}
+        for token in tokens:
+            tf[token] = tf.get(token, 0) + 1
+
+        score = 0.0
+        for term in query_terms:
+            freq = tf.get(term, 0)
+            if freq <= 0:
+                continue
+            df = term_doc_freq.get(term, 0)
+            idf = math.log(1 + (doc_count - df + 0.5) / (df + 0.5))
+            numerator = freq * (k1 + 1)
+            denominator = freq + k1 * (1 - b + b * doc_len / avg_doc_len)
+            score += idf * numerator / denominator
+
+        if score <= 0:
+            continue
+
+        doc = type(
+            "BM25Document",
+            (),
+            {
+                "page_content": str(text),
+                "metadata": metadata or {},
+            },
+        )()
+        scored.append(_build_chunk(doc, score, query_text, doc_id, doc_type))
+
+    scored.sort(key=lambda item: item.score, reverse=True)
+    return scored[:k]
+
+
+def _fuse_ranked_results(
+    vector_results: list[RetrievedChunk],
+    bm25_results: list[RetrievedChunk],
+    query_text: str,
+    doc_id: str,
+    doc_type: str,
+    k: int,
+) -> list[RetrievedChunk]:
+    fused_scores: dict[str, float] = {}
+    chunks: dict[str, RetrievedChunk] = {}
+    for rank, chunk in enumerate(vector_results, start=1):
+        fused_scores[chunk.chunk_id] = fused_scores.get(chunk.chunk_id, 0.0) + 1.0 / (RRF_K + rank)
+        chunks[chunk.chunk_id] = chunk
+    for rank, chunk in enumerate(bm25_results, start=1):
+        fused_scores[chunk.chunk_id] = fused_scores.get(chunk.chunk_id, 0.0) + 1.0 / (RRF_K + rank)
+        if chunk.chunk_id not in chunks:
+            chunks[chunk.chunk_id] = chunk
+
+    ranked = sorted(
+        fused_scores.items(),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    results: list[RetrievedChunk] = []
+    for chunk_id, score in ranked[:k]:
+        chunk = chunks[chunk_id]
         results.append(
             RetrievedChunk(
-                chunk_id=str(metadata.get("chunk_id", "")),
-                doc_id=str(metadata.get("doc_id", doc_id)),
-                doc_type=str(metadata.get("doc_type", doc_type)),
-                source_name=str(metadata.get("source_name", "")),
-                section_path=str(metadata.get("section_path", "ROOT")),
-                text=str(getattr(doc, "page_content", "")),
+                chunk_id=chunk.chunk_id,
+                doc_id=chunk.doc_id or doc_id,
+                doc_type=chunk.doc_type or doc_type,
+                source_name=chunk.source_name,
+                section_path=chunk.section_path,
+                text=chunk.text,
                 score=float(score),
                 query=query_text,
             )
         )
     return results
+
+
+def _search_once(
+    query_text: str,
+    doc_id: str,
+    doc_type: str,
+    k: int,
+    extra_filter: dict[str, str] | None = None,
+) -> list[RetrievedChunk]:
+    vector_results = _vector_search_once(
+        query_text=query_text,
+        doc_id=doc_id,
+        doc_type=doc_type,
+        k=k,
+        extra_filter=extra_filter,
+    )
+    if not HYBRID_SEARCH_ENABLED:
+        return vector_results
+
+    bm25_results = _bm25_search_once(
+        query_text=query_text,
+        doc_id=doc_id,
+        doc_type=doc_type,
+        k=max(k, BM25_TOP_K),
+        extra_filter=extra_filter,
+    )
+    if not bm25_results:
+        return vector_results
+
+    return _fuse_ranked_results(
+        vector_results=vector_results,
+        bm25_results=bm25_results,
+        query_text=query_text,
+        doc_id=doc_id,
+        doc_type=doc_type,
+        k=max(k, BM25_TOP_K),
+    )
 
 
 def _dedup_keep_best(chunks: list[RetrievedChunk]) -> list[RetrievedChunk]:

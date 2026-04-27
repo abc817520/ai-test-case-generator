@@ -16,6 +16,7 @@
 - 自动解析文档结构
 - 将需求文档切块并写入本地向量库
 - 基于 RAG 检索需求依据
+- 支持混合检索：向量召回 + BM25 召回 + RRF 融合
 - 用大模型生成需求分析
 - 从需求分析中提取测试点
 - 基于测试点生成测试大纲
@@ -59,6 +60,37 @@
 - 重排 rerank：`rag/reranker.py`
 - Prompt + 结构化输出：`skills/test_design_skills.py`
 - Excel 导出：`utils/excel_exporter/excel_exporter.py`
+
+### 2.1 架构图
+
+```mermaid
+flowchart LR
+    ENV[Environment<br/>需求文档 / 历史测试用例 / 人工审核反馈]
+
+    subgraph SYS["AI Test Case Generator"]
+        direction TB
+
+        P[Perception<br/>文档解析 / 状态读取 / 审核输入]
+        PLAN[Planning<br/>LangGraph Workflow]
+        CORE[The "Augmented" LLM<br/>需求分析 / 测试点 / 大纲 / 用例生成]
+        A[Action<br/>阶段推进 / 结果输出 / Excel 导出]
+
+        TOOLS[Tools<br/>Query 扩展 / 向量召回 / BM25 / RRF / Rerank]
+        MEM[Memory<br/>Chroma 向量库 / 历史用例知识库]
+
+        P --> CORE
+        PLAN --> CORE
+        CORE --> A
+        CORE --- TOOLS
+        CORE --- MEM
+        PLAN -.循环迭代.-> CORE
+    end
+
+    ENV --> P
+    A --> ENV
+    MEM --> CORE
+    A --> MEM
+```
 
 ---
 
@@ -305,7 +337,7 @@ streamlit run app/app.py
 
 ## 8. 关键配置说明
 
-配置主要在 [rag/config.py](</c:/Users/ASUS/Desktop/pdffffff笔记/langchain/langgraph/ai-test-case-generator/rag/config.py>)。
+配置主要在 [rag/config.py]
 
 ### 8.1 向量库配置
 
@@ -333,6 +365,15 @@ streamlit run app/app.py
 
 - `SEARCH_TYPE = "mmr"`
   当前使用最大边际相关性搜索
+
+- `HYBRID_SEARCH_ENABLED = True`
+  是否启用混合检索。开启后会同时执行向量召回和 BM25 召回，再做融合
+
+- `BM25_TOP_K = 8`
+  BM25 路径最多保留多少条候选结果
+
+- `RRF_K = 60`
+  RRF 融合参数。值越大，不同召回路数之间的排名差异会被拉平一些
 
 ### 8.4 Query 扩展配置
 
@@ -1037,9 +1078,17 @@ streamlit run app/app.py
 
 作用：
 
-- 对一个 query 做一次实际向量检索
+- 对一个 query 做一次实际检索
 - 支持 requirement / testcase 两类库
 - 支持额外 metadata 过滤
+
+当前默认会执行：
+
+- 向量召回
+- BM25 召回
+- 用 RRF 对两路结果做融合
+
+如果 `HYBRID_SEARCH_ENABLED = False`，则退回为原来的纯向量检索
 
 ### `_dedup_keep_best(chunks)`
 
@@ -1060,10 +1109,11 @@ streamlit run app/app.py
 2. 判断是否启用 multi-query
 3. 生成扩展 query
 4. 对每条 query 检索
-5. 汇总候选
-6. 去重
-7. rerank
-8. 返回最终结果和元数据
+5. 每条 query 内部执行“向量召回 + BM25 召回 + RRF 融合”
+6. 汇总候选
+7. 去重
+8. rerank
+9. 返回最终结果和元数据
 
 ### `retrieve_context(...)`
 
@@ -1202,7 +1252,7 @@ streamlit run app/app.py
    把章节正文和表格拆成多个 chunk，写入 Chroma
 
 3. 检索
-   根据当前阶段 query，从向量库里取相关片段
+   根据当前阶段 query，同时做向量召回和 BM25 召回，并用 RRF 融合相关片段
 
 4. 重排
    用 `cross_encoder` 或 `lite` rerank，把更相关的片段排前面
@@ -1317,6 +1367,9 @@ LangGraph 里有一个很重要的能力叫：
 因为当前 `SEARCH_TYPE = "mmr"` 时，代码里对 MMR 返回文档的 score 没有真实打分值，暂时统一记成 `0.0`。
 
 这不等于“不相关”。
+
+另外，开启混合检索后，召回阶段还会把向量结果和 BM25 结果做 RRF 融合。
+这时最终返回的 `score` 可能是融合分，不一定直接表示某一路原始检索分数。
 
 ### Q4：为什么 rerank 显示 `cross_encoder`，但有时还是回退？
 

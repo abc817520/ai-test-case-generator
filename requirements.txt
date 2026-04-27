@@ -1,0 +1,13 @@
+streamlit
+python-dotenv
+langchain
+langchain-community
+langchain-core
+langchain-openai
+langgraph
+chromadb
+pydantic
+openpyxl
+mistune
+python-docx
+sentence-transformers
